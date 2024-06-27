@@ -1,0 +1,1306 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+library(Rsubread)
+library(edgeR)
+library(tidyverse)
+library(pheatmap)
+library(gprofiler2)
+library(RColorBrewer)
+library(ggpubr)
+```
+
+## Generating Counts Table From Aligned Reads (BAM Files)
+
+Paired-end raw reads (N=32 read pairs) in the form of fastq files where
+received from Genome Quebec. Read were aligned to the latest ENSEMBL
+human genome (***hsapiens*** GRCh38.109) Using the STAR aligner tool
+(version 2.7.10a) with recommended settings. Using only those reads
+which mapped uniquely, a counts table for all genes was generated using
+the rsubread tool ***featureCounts***.
+
+```{r}
+Raw_Counts <- featureCounts(files = c("../Bam_FIles/CF1C",
+                        "../Bam_FIles/CF1T",
+                        "../Bam_FIles/CF1TC",
+                        "../Bam_FIles/CF1V",
+                        "../Bam_FIles/CF2C",
+                        "../Bam_FIles/CF2T",
+                        "../Bam_FIles/CF2TC",
+                        "../Bam_FIles/CF2V",
+                        "../Bam_FIles/CM2CR",
+                        "../Bam_FIles/CM2TC",
+                        "../Bam_FIles/CM2TR",
+                        "../Bam_FIles/CM2VR",
+                        "../Bam_FIles/CM3C",
+                        "../Bam_FIles/CM3T",
+                        "../Bam_FIles/CM3TC",
+                        "../Bam_FIles/CM3V",
+                        "../Bam_FIles/SF2C",
+                        "../Bam_FIles/SF2T",
+                        "../Bam_FIles/SF2TC",
+                        "../Bam_FIles/SF2V",
+                        "../Bam_FIles/SF3C",
+                        "../Bam_FIles/SF3T",
+                        "../Bam_FIles/SF3TCR",
+                        "../Bam_FIles/SF3VR",
+                        "../Bam_FIles/SM1C",
+                        "../Bam_FIles/SM1T",
+                        "../Bam_FIles/SM1TC",
+                        "../Bam_FIles/SM1VR",
+                        "../Bam_FIles/SM3C",
+                        "../Bam_FIles/SM3TC",
+                        "../Bam_FIles/SM3T",
+                        "../Bam_FIles/SM3V"),
+              annot.ext = "/mnt/RNA_SEQ/Annotated_Genomes/Homo_sapiens.GRCh38.109.chr.gtf.gz",
+              isGTFAnnotationFile = TRUE,
+              isPairedEnd = TRUE,
+              GTF.featureType = "exon",
+              GTF.attrType = "gene_id",
+              nthreads = 20,
+              countMultiMappingReads = FALSE
+                )
+
+#Taking out the actual counts data frame
+Counts <- Raw_Counts$counts
+
+```
+
+Next we read in the previously generated sample information data frame:
+
+```{r}
+Sample_Info_df<- read.csv(file = "Sample_Info.csv")
+Sample_Info_df %>% glimpse()
+```
+
+Genes with low counts are filtered out using a CPM cut off that equates
+to \~10-15 reads in samples. In this case, genes with a CPM \> 0.4 in at
+least 4 samples will be filtered out.
+
+```         
+[1] 22834    32
+```
+
+```{r}
+CPM <- cpm(Counts)
+
+#Visualizing the CPM cut-off in one sample from each group. A CPM cutoff of < 0.4 is good to use.
+par(mfrow = c (2, 4))
+plot(CPM[,1], Counts[,1], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,5], Counts[,5], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,9], Counts[,9], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,13], Counts[,13], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,17], Counts[,17], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,21], Counts[,21], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,25], Counts[,25], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+plot(CPM[,29], Counts[,29], ylim = c(0,50), xlim=c(0,5))
+abline(h=15, v = 0.4)
+
+#Actual filtering of lowly expressed genes.
+thresh <- CPM > 0.4
+filt <- rowSums(thresh) >= 4
+summary(filt)
+Counts.Keep <- Counts[filt,]
+dim(Counts.Keep)
+
+
+```
+
+All genes will be annotated with their proper gene symbols and
+descriptions using gprofiler. If a gene does not have an annotated gene
+symbol, it will be removed from the analysis.
+
+```{r}
+
+Gene_info <- gconvert(query = rownames(Counts.Keep),
+                      organism = "hsapiens",
+                      target = "ENSG",
+                      filter_na = F,
+                      mthreshold = 1)
+
+Counts_Final <- as_tibble(Counts.Keep)
+Counts_Final$ENSEMBL <- Gene_info$input
+Counts_Final$Symbol <- Gene_info$name
+Counts_Final$Description <- Gene_info$description
+
+Counts_Final <- Counts_Final %>%
+  drop_na(Symbol)
+
+dim(Counts_Final)
+```
+
+Now we generate the DGE list object which edgeR uses to keep all
+information and data for the DE analysis, as well as the design matrix
+to be used for setting up the contrasts of interest.
+
+```{r}
+dgeOBJ <- DGEList(counts = Counts_Final[,1:32], 
+                 group = Sample_Info_df$Meta.Group, 
+                 genes = Counts_Final$Symbol)
+#Adding all gene information into the dgeOBJ
+dgeOBJ$genes$Description <- Counts_Final$Description
+dgeOBJ$genes$ENSEMBL <- Counts_Final$ENSEMBL
+#Normalizing the counts data using TMM normalization
+dgeOBJ <- calcNormFactors(dgeOBJ)
+#Making the design matrix and cleaning up the column names
+design <- model.matrix(~0 + Sample_Info_df$Meta.Group, data = dgeOBJ$samples)
+colnames(design) <- gsub("Sample_Info_df\\$Meta.Group", "", colnames(design))
+design
+#Estimating dispersion and visualizing the biological coefficient of variation (BCV). A BCV  between 0.2 and 0.4 is considered acceptable
+dgeOBJ <- estimateDisp(dgeOBJ, design)
+plotBCV(dgeOBJ)
+#Fitting a quasi-likelihood negative binomial generalized log-linear model to the count data (from the function description)
+fit <- glmQLFit(dgeOBJ, design = design)
+```
+
+Before the DE analysis, we generate a PCA plot to visualize how the
+samples cluster together based on gene expression profiles.
+
+```{r}
+color_MDS <- c("black", "red4", "blue4", "purple4", "darkgrey", "red1", "cyan4", "purple1")[Sample_Info_df$Meta.Group]
+par(mar = c(5,5,5,10), xpd = TRUE)
+plotMDS(dgeOBJ , main = "PCA Colored By Group - Dim 1&2", cex.main = 2, cex.lab = 1.2, col = color_MDS)
+legend("topright", 
+       legend=levels(Sample_Info_df$Meta.Group), 
+       col = c("black", "red4", "blue4", "purple4", "darkgrey", "red1", "cyan4", "purple1"), 
+       pch =16,
+       bty = "n",
+       inset = c(-0.3, 0),
+       title = "Treatment",
+       title.cex = 1.5)
+
+#CM3 cell line and maybe CM2 cells line seem to be isolated from the rest. Might be worth while to remove them 
+
+```
+
+### Differential Expression Analysis - Within condition comparisons
+
+First, the comparisons of treatment vs vehicle will be examined within
+the control and schizophrenia condition groups.
+
+CONTROL: THC VS VEHICLE
+
+
+```{r}
+Cntrl_THC_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(-1, 1,0,0,0,0,0,0))
+Cntrl_THC_Vs_VEH_qlf
+
+Cntrl_THC_Vs_VEH_df <- as.data.frame(topTags(Cntrl_THC_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+Cntrl_THC_Vs_VEH_df <- Cntrl_THC_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(Cntrl_THC_Vs_VEH_df$Significance)
+
+write.csv(Cntrl_THC_Vs_VEH_df, file = "tables_and_figures/Cntrl_THC_Vs_VEH_df.csv")
+
+Cntrl_THC_Vs_VEH_volc<- Cntrl_THC_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "Control: THC VS Vehicle\n")
+
+ggsave(plot = Cntrl_THC_Vs_VEH_volc,
+         filename = "Control_THC_VS_Vehicle.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#gost
+Cntrl_THC_Vs_VEH_gost<- gost(query = Cntrl_THC_Vs_VEH_df$ENSEMBL[Cntrl_THC_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+Cntrl_THC_Vs_VEH_gost_df <- Cntrl_THC_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(Cntrl_THC_Vs_VEH_gost_df, 
+          file = "tables_and_figures/Cntrl_THC_Vs_VEH_gost_df.csv")
+
+Cntrl_THC_Vs_VEH_gost_count<- Cntrl_THC_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "Control: THC VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = Cntrl_THC_Vs_VEH_gost_count,
+         filename = "Cntrl_THC_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+
+```
+
+CONTROL: CBD VS VEHICLE
+
+```{r}
+Cntrl_CBD_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(-1, 0,1,0,0,0,0,0))
+Cntrl_CBD_Vs_VEH_qlf
+
+Cntrl_CBD_Vs_VEH_df <- as.data.frame(topTags(Cntrl_CBD_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+Cntrl_CBD_Vs_VEH_df <- Cntrl_CBD_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(Cntrl_CBD_Vs_VEH_df$Significance)
+
+write.csv(Cntrl_CBD_Vs_VEH_df, file = "tables_and_figures/Cntrl_CBD_Vs_VEH_df.csv")
+
+Cntrl_CBD_Vs_VEH_volc<- Cntrl_CBD_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "Control: CBD VS Vehicle\n")
+
+ggsave(plot = Cntrl_CBD_Vs_VEH_volc,
+         filename = "Cntrl_CBD_Vs_VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#gost
+Cntrl_CBD_Vs_VEH_gost<- gost(query = Cntrl_CBD_Vs_VEH_df$ENSEMBL[Cntrl_CBD_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+Cntrl_CBD_Vs_VEH_gost_df <- Cntrl_CBD_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(Cntrl_CBD_Vs_VEH_gost_df, 
+          file = "tables_and_figures/Cntrl_CBD_Vs_VEH_gost_df.csv")
+
+Cntrl_CBD_Vs_VEH_gost_count<- Cntrl_CBD_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "Control: CBD VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = Cntrl_CBD_Vs_VEH_gost_count,
+         filename = "Cntrl_CBD_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+```
+
+
+CONTROL: COMBO VS VEHICLE
+
+```{r}
+Cntrl_COMBO_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(-1, 0,0,1,0,0,0,0))
+Cntrl_COMBO_Vs_VEH_qlf
+
+Cntrl_COMBO_Vs_VEH_df <- as.data.frame(topTags(Cntrl_COMBO_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+Cntrl_COMBO_Vs_VEH_df <- Cntrl_COMBO_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(Cntrl_COMBO_Vs_VEH_df$Significance)
+
+write.csv(Cntrl_COMBO_Vs_VEH_df, file = "tables_and_figures/Cntrl_COMBO_Vs_VEH_df.csv")
+
+Cntrl_COMBO_Vs_VEH_volc<- Cntrl_COMBO_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "Control: Combo VS Vehicle\n")
+
+ggsave(plot = Cntrl_COMBO_Vs_VEH_volc,
+         filename = "Cntrl_COMBO_Vs_VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#gost
+Cntrl_COMBO_Vs_VEH_gost<- gost(query = Cntrl_COMBO_Vs_VEH_df$ENSEMBL[Cntrl_COMBO_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+Cntrl_COMBO_Vs_VEH_gost_df <- Cntrl_COMBO_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(Cntrl_COMBO_Vs_VEH_gost_df, 
+          file = "tables_and_figures/Cntrl_COMBO_Vs_VEH_gost_df.csv")
+
+Cntrl_COMBO_Vs_VEH_gost_count<- Cntrl_COMBO_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "Control: Combo VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = Cntrl_COMBO_Vs_VEH_gost_count,
+         filename = "Cntrl_COMBO_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+#no DE Genes
+```
+
+
+
+Now the comparisons between treatments and vehicle in the schizophrenic
+condition
+
+SCZ: THC VS VEHICLE
+
+```{r}
+SCZ_THC_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(0,0,0,0,-1,1,0,0))
+SCZ_THC_Vs_VEH_qlf
+
+SCZ_THC_Vs_VEH_df <- as.data.frame(topTags(SCZ_THC_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+SCZ_THC_Vs_VEH_df <- SCZ_THC_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SCZ_THC_Vs_VEH_df$Significance)
+
+write.csv(SCZ_THC_Vs_VEH_df, file = "tables_and_figures/SCZ_THC_Vs_VEH_df.csv")
+
+SCZ_THC_Vs_VEH_volc<- SCZ_THC_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ: THC VS Vehicle\n")
+
+ggsave(plot = SCZ_THC_Vs_VEH_volc,
+         filename = "SCZ_THC_Vs_VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SCZ_THC_Vs_VEH_gost<- gost(query = SCZ_THC_Vs_VEH_df$ENSEMBL[SCZ_THC_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SCZ_THC_Vs_VEH_gost_df <- SCZ_THC_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SCZ_THC_Vs_VEH_gost_df, 
+          file = "tables_and_figures/SCZ_THC_Vs_VEH_gost_df.csv")
+
+SCZ_THC_Vs_VEH_gost_count<- SCZ_THC_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ: THC VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SCZ_THC_Vs_VEH_gost_count,
+         filename = "SCZ_THC_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+#no DE Genes
+```
+
+SCZ: CBD VS VEHICLE
+
+```{r}
+SCZ_CBD_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(0,0,0,0,-1,0,1,0))
+SCZ_CBD_Vs_VEH_qlf
+
+SCZ_CBD_Vs_VEH_df <- as.data.frame(topTags(SCZ_CBD_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+SCZ_CBD_Vs_VEH_df <- SCZ_CBD_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SCZ_CBD_Vs_VEH_df$Significance)
+
+write.csv(SCZ_CBD_Vs_VEH_df, file = "tables_and_figures/SCZ_CBD_Vs_VEH_df.csv")
+
+SCZ_CBD_Vs_VEH_volc<- SCZ_CBD_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ: CBD VS Vehicle\n")
+
+ggsave(plot = SCZ_CBD_Vs_VEH_volc,
+         filename = "SCZ_CBD_Vs_VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SCZ_CBD_Vs_VEH_gost<- gost(query = SCZ_CBD_Vs_VEH_df$ENSEMBL[SCZ_CBD_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SCZ_CBD_Vs_VEH_gost_df <- SCZ_CBD_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SCZ_CBD_Vs_VEH_gost_df, 
+          file = "tables_and_figures/SCZ_CBD_Vs_VEH_gost_df.csv")
+
+SCZ_CBD_Vs_VEH_gost_count<- SCZ_CBD_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ: CBD VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SCZ_CBD_Vs_VEH_gost_count,
+         filename = "SCZ_CBD_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#no DE Genes
+```
+
+
+
+
+
+SCZ: COMBO VS VEHICLE
+
+```{r}
+SCZ_COMBO_Vs_VEH_qlf <- glmQLFTest(fit,
+                                   contrast = c(0,0,0,0,-1,0,0,1))
+SCZ_COMBO_Vs_VEH_qlf
+
+SCZ_COMBO_Vs_VEH_df <- as.data.frame(topTags(SCZ_COMBO_Vs_VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+SCZ_COMBO_Vs_VEH_df <- SCZ_COMBO_Vs_VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SCZ_COMBO_Vs_VEH_df$Significance)
+
+write.csv(SCZ_COMBO_Vs_VEH_df, file = "tables_and_figures/SCZ_COMBO_Vs_VEH_df.csv")
+
+SCZ_COMBO_Vs_VEH_volc<- SCZ_COMBO_Vs_VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ: Combo VS Vehicle\n")
+
+ggsave(plot = SCZ_COMBO_Vs_VEH_volc,
+         filename = "SCZ_COMBO_Vs_VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SCZ_COMBO_Vs_VEH_gost<- gost(query = SCZ_COMBO_Vs_VEH_df$ENSEMBL[SCZ_COMBO_Vs_VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SCZ_COMBO_Vs_VEH_gost_df <- SCZ_COMBO_Vs_VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SCZ_COMBO_Vs_VEH_gost_df, 
+          file = "tables_and_figures/SCZ_COMBO_Vs_VEH_gost_df.csv")
+
+SCZ_COMBO_Vs_VEH_gost_count<- SCZ_COMBO_Vs_VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ: Combo VS Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SCZ_COMBO_Vs_VEH_gost_count,
+         filename = "SCZ_COMBO_Vs_VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+#no DE Genes
+```
+
+### Differential Expression Analysis - Between condition comparisons
+
+First, the contrasts of interest will be generated.
+
+```{r}
+myContrasts<- makeContrasts(SZC.THCvsCNT.THC = (ST-SV)-(CT-CV),
+                            SZC.CBDvsCNT.CBD = (SC-SV)-(CC-CV),
+                            SZC.COMBOvsCNT.COMBO = (STC-SV)-(CTC-CV),
+                            SZC.VEHvsCNT.VEH = SV-CV,
+                            levels = design)
+
+```
+
+SCZ Vehicle vs CNTRL Vehicle
+
+```{r}
+SCZ.VEH_Vs_CNTRL.VEH_qlf <- glmQLFTest(fit,
+                                   contrast = myContrasts[,"SZC.VEHvsCNT.VEH"])
+SCZ.VEH_Vs_CNTRL.VEH_qlf
+
+SCZ.VEH_Vs_CNTRL.VEH_df <- as.data.frame(topTags(SCZ.VEH_Vs_CNTRL.VEH_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+SCZ.VEH_Vs_CNTRL.VEH_df <- SCZ.VEH_Vs_CNTRL.VEH_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SCZ.VEH_Vs_CNTRL.VEH_df$Significance)
+
+write.csv(SCZ.VEH_Vs_CNTRL.VEH_df, file = "tables_and_figures/SCZ.VEH_Vs_CNTRL.VEH_df.csv")
+
+SCZ.VEH_Vs_CNTRL.VEH_volc<- SCZ.VEH_Vs_CNTRL.VEH_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ Vehicle VS CNTRL Vehicle\n")
+
+ggsave(plot = SCZ.VEH_Vs_CNTRL.VEH_volc,
+         filename = "SCZ.VEH_Vs_CNTRL.VEH_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SCZ.VEH_Vs_CNTRL.VEH_gost<- gost(query = SCZ.VEH_Vs_CNTRL.VEH_df$ENSEMBL[SCZ.VEH_Vs_CNTRL.VEH_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SCZ.VEH_Vs_CNTRL.VEH_gost_df <- SCZ.VEH_Vs_CNTRL.VEH_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SCZ.VEH_Vs_CNTRL.VEH_gost_df, 
+          file = "tables_and_figures/SCZ.VEH_Vs_CNTRL.VEH_gost_df.csv")
+
+SCZ.VEH_Vs_CNTRL.VEH_gost_count<- SCZ.VEH_Vs_CNTRL.VEH_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ Vehicle VS CNTRL Vehicle Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SCZ.VEH_Vs_CNTRL.VEH_gost_count,
+         filename = "SCZ.VEH_Vs_CNTRL.VEH_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+```
+
+SCZ THC vs CNTRL THC
+
+```{r}
+SZC.THCvsCNT.THC_qlf <- glmQLFTest(fit,
+                                   contrast = myContrasts[,"SZC.THCvsCNT.THC"])
+SZC.THCvsCNT.THC_qlf
+
+SZC.THCvsCNT.THC_df <- as.data.frame(topTags(SZC.THCvsCNT.THC_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+SZC.THCvsCNT.THC_df <- SZC.THCvsCNT.THC_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SZC.THCvsCNT.THC_df$Significance)
+
+write.csv(SZC.THCvsCNT.THC_df, file = "tables_and_figures/SZC.THCvsCNT.THC_df.csv")
+
+SZC.THCvsCNT.THC_volc<- SZC.THCvsCNT.THC_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ THC VS CNTRL THC\n")
+
+ggsave(plot = SZC.THCvsCNT.THC_volc,
+         filename = "SZC.THCvsCNT.THC_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SZC.THCvsCNT.THC_gost<- gost(query = SZC.THCvsCNT.THC_df$ENSEMBL[SZC.THCvsCNT.THC_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SZC.THCvsCNT.THC_gost_df <- SZC.THCvsCNT.THC_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SZC.THCvsCNT.THC_gost_df, 
+          file = "tables_and_figures/SZC.THCvsCNT.THC_gost_df.csv")
+
+SZC.THCvsCNT.THC_gost_count<- SZC.THCvsCNT.THC_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ THC VS CNTRL THC Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SZC.THCvsCNT.THC_gost_count,
+         filename = "SZC.THCvsCNT.THC_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+```
+
+SCZ CBD vs CNTRL CBD
+
+```{r}
+
+SZC.CBDvsCNT.CBD_qlf <- glmQLFTest(fit,
+                                   contrast = myContrasts[,"SZC.CBDvsCNT.CBD"])
+SZC.CBDvsCNT.CBD_qlf
+
+SZC.CBDvsCNT.CBD_df <- as.data.frame(topTags(SZC.CBDvsCNT.CBD_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+SZC.CBDvsCNT.CBD_df <- SZC.CBDvsCNT.CBD_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SZC.CBDvsCNT.CBD_df$Significance)
+
+write.csv(SZC.CBDvsCNT.CBD_df, file = "tables_and_figures/SZC.CBDvsCNT.CBD_df.csv")
+
+SZC.CBDvsCNT.CBD_volc<- SZC.CBDvsCNT.CBD_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ CBD VS CNTRL CBD\n")
+
+ggsave(plot = SZC.CBDvsCNT.CBD_volc,
+         filename = "SZC.CBDvsCNT.CBD_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SZC.CBDvsCNT.CBD_gost<- gost(query = SZC.CBDvsCNT.CBD_df$ENSEMBL[SZC.CBDvsCNT.CBD_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SZC.CBDvsCNT.CBD_gost_df <- SZC.CBDvsCNT.CBD_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SZC.CBDvsCNT.CBD_gost_df, 
+          file = "tables_and_figures/SZC.CBDvsCNT.CBD_gost_df.csv")
+
+SZC.CBDvsCNT.CBD_gost_count<- SZC.CBDvsCNT.CBD_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ CBD VS CNTRL CBD Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SZC.CBDvsCNT.CBD_gost_count,
+         filename = "SZC.CBDvsCNT.CBD_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+
+```
+
+SCZ COMBO vs CNTRL COMBO
+
+```{r}
+SZC.COMBOvsCNT.COMBO_qlf <- glmQLFTest(fit,
+                                   contrast = myContrasts[,"SZC.COMBOvsCNT.COMBO"])
+SZC.COMBOvsCNT.COMBO_qlf
+
+SZC.COMBOvsCNT.COMBO_df <- as.data.frame(topTags(SZC.COMBOvsCNT.COMBO_qlf,
+                                             n = Inf,
+                                             sort.by = "PValue",
+                                             adjust.method = "fdr"))
+
+
+SZC.COMBOvsCNT.COMBO_df <- SZC.COMBOvsCNT.COMBO_df %>% 
+  mutate(Significance = case_when(PValue < 0.05 & logFC >= 1.5 ~ "Up",
+                                  PValue < 0.05 & logFC <= -1.5 ~ "Down",
+                                  logFC < 1.5 ~ "No",
+                                  logFC > -1.5 ~ "No"))
+
+
+table(SZC.COMBOvsCNT.COMBO_df$Significance)
+
+write.csv(SZC.COMBOvsCNT.COMBO_df, file = "tables_and_figures/SZC.COMBOvsCNT.COMBO_df.csv")
+
+SZC.COMBOvsCNT.COMBO_volc<- SZC.COMBOvsCNT.COMBO_df %>% 
+  mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "") + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = "SCZ Combo VS CNTRL Combo\n")
+
+ggsave(plot = SZC.COMBOvsCNT.COMBO_volc,
+         filename = "SZC.COMBOvsCNT.COMBO_volc.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+#NO GOST
+SZC.COMBOvsCNT.COMBO_gost<- gost(query = SZC.COMBOvsCNT.COMBO_df$ENSEMBL[SZC.COMBOvsCNT.COMBO_df$Significance != "No"],
+     organism = "hsapiens",
+     domain_scope = "annotated",
+     significant = T,
+     user_threshold = 0.01,
+     evcodes = T)
+
+SZC.COMBOvsCNT.COMBO_gost_df <- SZC.COMBOvsCNT.COMBO_gost$result %>%
+  select(p_value, term_size, query_size, intersection_size, term_id, source, term_name, intersection) %>% 
+  mutate(log10pvalue = -log10(p_value)) %>% 
+  mutate(Gene_Ratio = intersection_size/term_size) %>% 
+  relocate(log10pvalue, .after = p_value) %>% 
+  relocate(Gene_Ratio, .after = intersection_size) %>% 
+  rename(Source = source)
+
+write.csv(SZC.COMBOvsCNT.COMBO_gost_df, 
+          file = "tables_and_figures/SZC.COMBOvsCNT.COMBO_gost_df.csv")
+
+SZC.COMBOvsCNT.COMBO_gost_count<- SZC.COMBOvsCNT.COMBO_gost_df %>% 
+  ggplot(aes(x = Source, col = Source, fill = Source)) +
+  geom_bar(alpha = 0.6,
+           linewidth = 1.2)+
+  geom_text(stat = "count",
+            aes(label = after_stat(count)),
+            color = "black",
+            vjust = -0.5)+
+  theme_classic()+
+  labs(x = "Source Database", 
+       y= "Number of Enriched Terms",
+       title = "SCZ Combo VS CNTRL Combo Functional Enrichment Breakdown\n")+
+  guides(color = "none", 
+         fill = "none")
+
+ggsave(plot = SZC.COMBOvsCNT.COMBO_gost_count,
+         filename = "SZC.COMBOvsCNT.COMBO_gost_count.tiff",
+         device = "tiff", 
+         dpi = 500, 
+         path = "tables_and_figures/")
+
+
+```
+
+
+
+```{r}
+comparison_dfs = c("Cntrl_THC_Vs_VEH_df", "Cntrl_CBD_Vs_VEH_df", "Cntrl_COMBO_Vs_VEH_df", "SCZ_THC_Vs_VEH_df", "SCZ_CBD_Vs_VEH_df", "SCZ_COMBO_Vs_VEH_df", "SCZ.VEH_Vs_CNTRL.VEH_df", "SZC.THCvsCNT.THC_df", "SZC.CBDvsCNT.CBD_df", "SZC.COMBOvsCNT.COMBO_df")
+
+comparison_df_list = list(Cntrl_THC_Vs_VEH_df, Cntrl_CBD_Vs_VEH_df, Cntrl_COMBO_Vs_VEH_df, SCZ_THC_Vs_VEH_df, SCZ_CBD_Vs_VEH_df, SCZ_COMBO_Vs_VEH_df, SCZ.VEH_Vs_CNTRL.VEH_df, SZC.THCvsCNT.THC_df, SZC.CBDvsCNT.CBD_df, SZC.COMBOvsCNT.COMBO_df)
+
+volc_titles = c("Control: THC VS Vehicle\n", "Control: CBD VS Vehicle\n", "Control: Combo VS Vehicle\n", "SCZ: THC VS Vehicle\n", "SCZ: CBD VS Vehicle\n", "SCZ: Combo VS Vehicle\n", "SCZ Vehicle VS CNTRL Vehicle\n", "SCZ THC VS CNTRL THC\n", "SCZ CBD VS CNTRL CBD\n","SCZ Combo VS CNTRL Combo\n" )
+
+graph_names = c("Cntrl_THC_Vs_VEH_volc", "Cntrl_CBD_Vs_VEH_volc", "Cntrl_COMBO_Vs_VEH_volc", "SCZ_THC_Vs_VEH_volc", "SCZ_CBD_Vs_VEH_volc", "SCZ_COMBO_Vs_VEH_volc", "SCZ.VEH_Vs_CNTRL.VEH_volc", "SZC.THCvsCNT.THC_volc", "SZC.CBDvsCNT.CBD_volc", "SZC.COMBOvsCNT.COMBO_volc")
+
+names(comparison_df_list) = comparison_dfs
+
+i = 0
+
+for (df in comparison_df_list) {
+  i = i +1
+  up = as.numeric(table(df$Significance)[3])
+  down = as.numeric(table(df$Significance)[1])
+  gtitle = volc_titles[i]
+  
+  volc_graph<- df %>% mutate(logPval = -log10(PValue)) %>% 
+  mutate(Significance = as.factor(Significance)) %>% 
+  mutate(Significance = fct_relevel(Significance, c("Up", "No", "Down"))) %>% 
+  ggplot(aes(x = logFC, y = logPval, col = Significance)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05),
+             linewidth = 1.2) +
+  geom_vline(xintercept = -1.5,
+             linewidth = 1.2)+
+  geom_vline(xintercept = 1.5,
+             linewidth = 1.2)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     name = "",
+                   breaks = c("Up","", "Down"),
+                   labels = c(glue("Upregulated ({up})"), "", glue('Downregulated ({down})'))) + 
+  theme_classic2()+
+  labs(x = "log2(FC)", 
+       y = "-log10(Pvalue)",
+       title = gtitle)
+  
+  ggsave(plot = volc_graph,
+         filename = glue("{graph_names[i]}.tiff"),
+         device = "tiff", 
+         dpi = 500, 
+         path = "Volcano_plots_batch//")
+  
+  }
+
+
+
+
+```
+
+
+batch making bubble plots for gprofiler results
+```{r}
+gost_df_names = c("Cntrl_THC_Vs_VEH_gost_df", "Cntrl_CBD_Vs_VEH_gost_df", "Cntrl_COMBO_Vs_VEH_gost_df", "SCZ_CBD_Vs_VEH_gost_df", "SCZ_COMBO_Vs_VEH_gost_df", "SCZ.VEH_Vs_CNTRL.VEH_gost_df", "SZC.THCvsCNT.THC_gost_df", "SZC.CBDvsCNT.CBD_gost_df", "SZC.COMBOvsCNT.COMBO_gost_df")
+gost_df_list = list(Cntrl_THC_Vs_VEH_gost_df, Cntrl_CBD_Vs_VEH_gost_df, Cntrl_COMBO_Vs_VEH_gost_df, SCZ_CBD_Vs_VEH_gost_df, SCZ_COMBO_Vs_VEH_gost_df, SCZ.VEH_Vs_CNTRL.VEH_gost_df, SZC.THCvsCNT.THC_gost_df, SZC.CBDvsCNT.CBD_gost_df, SZC.COMBOvsCNT.COMBO_gost_df)
+
+bubble_titles = c("Control: THC VS Vehicle\n", "Control: CBD VS Vehicle\n", "Control: Combo VS Vehicle\n", "SCZ: CBD VS Vehicle\n", "SCZ: Combo VS Vehicle\n", "SCZ Vehicle VS CNTRL Vehicle\n", "SCZ THC VS CNTRL THC\n", "SCZ CBD VS CNTRL CBD\n","SCZ Combo VS CNTRL Combo\n" )
+graph_names_GO = c("Cntrl_THC_Vs_VEH_go_fig", "Cntrl_CBD_Vs_VEH_go_fig", "Cntrl_COMBO_Vs_VEH_go_fig", "SCZ_CBD_Vs_VEH_go_fig", "SCZ_COMBO_Vs_VEH_go_fig", "SCZ.VEH_Vs_CNTRL.VEH_go_fig", "SZC.THCvsCNT.THC_go_fig", "SZC.CBDvsCNT.CBD_go_fig", "SZC.COMBOvsCNT.COMBO_go_fig")
+graph_names_other = c("Cntrl_THC_Vs_VEH_other_fig", "Cntrl_CBD_Vs_VEH_other_fig", "Cntrl_COMBO_Vs_VEH_other_fig", "SCZ_CBD_Vs_VEH_other_fig", "SCZ_COMBO_Vs_VEH_other_fig", "SCZ.VEH_Vs_CNTRL.VEH_other_fig", "SZC.THCvsCNT.THC_other_fig", "SZC.CBDvsCNT.CBD_other_fig", "SZC.COMBOvsCNT.COMBO_other_fig")
+
+names(gost_df_list) = gost_df_names
+
+i = 0
+
+for (df in gost_df_list) {
+  i = i +1
+  sub_title = bubble_titles[i]
+  go_fig_name = graph_names_GO[i]
+  other_fig_name = graph_names_other[i]
+  
+  go_fig = df %>% 
+    group_by(Source) %>%
+    dplyr::filter(Source == "GO:BP" | Source == "GO:CC" | Source == "GO:MF") %>% 
+    arrange(desc(log10pvalue)) %>%
+    mutate(term_name = fct_reorder(term_name, log10pvalue, .desc = F)) %>% 
+    top_n(15, log10pvalue) %>%
+    ggplot(aes(y=term_name, x = log10pvalue, col = log10pvalue, size = Gene_Ratio,))+
+    geom_point() +
+    scale_fill_viridis(option = "A") +
+    scale_color_viridis(option = "A")+
+    scale_y_discrete(labels = function(x) str_wrap(x, width = 45))+
+    facet_wrap(~Source, scales = "free")+
+    labs(y="Source Database\n", x = "\n-log10(p-value)", col = "-log10(p-value)", size =
+         "Gene Ratio") +
+    ggtitle(glue("g:Profiler Functional Enrichment Analysis GO Results:\n{sub_title}\n"))+
+    theme_classic(base_size = 16)
+
+  ggsave(plot = go_fig, 
+       filename = glue("bubble_plots_batch/{go_fig_name}.tiff"),
+       dpi = 500, 
+       device = "tiff", 
+       width = 50, 
+       height = 20,
+       units = "cm")
+  
+  other_fig = df %>% 
+    group_by(Source) %>%
+  dplyr::filter(Source != "GO:BP" & Source != "GO:CC" & Source != "GO:MF") %>% 
+  arrange(desc(log10pvalue)) %>%
+  mutate(term_name = fct_reorder(term_name, log10pvalue, .desc = F)) %>% 
+  top_n(15, log10pvalue) %>%
+  ggplot(aes(y=term_name, x = log10pvalue, col = log10pvalue, size = Gene_Ratio,))+
+  geom_point() +
+  scale_fill_viridis(option = "A") +
+  scale_color_viridis(option = "A")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40))+
+  facet_wrap(~Source, scales = "free")+
+  labs(y="Source Database\n", x = "\n-log10(p-value)", col = "-log10(p-value)", size =
+         "Gene Ratio") +
+ ggtitle(glue("g:Profiler Functional Enrichment Analysis Results Continued:\n{sub_title}\n"))+
+  theme_classic(base_size = 12)
+  
+  
+  ggsave(plot = other_fig, 
+       filename = glue("bubble_plots_batch/{other_fig_name}.tiff"),
+       dpi = 500, 
+       device = "tiff", 
+       width = 50, 
+       height = 30,
+       units = "cm")
+
+  
+  
+
+}
+
+
+
+```
+
+```{r}
+
+test = Cntrl_THC_Vs_VEH_gost_df %>%
+  group_by(Source) %>%
+  dplyr::filter(Source == "GO:BP" | Source == "GO:CC" | Source == "GO:MF") %>% 
+  arrange(desc(log10pvalue)) %>%
+  mutate(term_name = fct_reorder(term_name, log10pvalue, .desc = F)) %>% 
+  top_n(15, log10pvalue) %>%
+  ggplot(aes(y=term_name, x = log10pvalue, col = log10pvalue, size = Gene_Ratio,))+
+  geom_point() +
+  scale_fill_viridis(option = "A") +
+  scale_color_viridis(option = "A")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 45))+
+  facet_wrap(~Source, scales = "free")+
+  labs(y="Source Database\n", x = "\n-log10(p-value)", col = "-log10(p-value)", size =
+         "Gene Ratio") +
+ ggtitle("g:Profiler Functional Enrichment Analysis GO results\nControl: THC VS Vehicle\n")+
+  theme_classic(base_size = 16)
+
+
+test2 = Cntrl_THC_Vs_VEH_gost_df %>%
+  group_by(Source) %>%
+  dplyr::filter(Source != "GO:BP" & Source != "GO:CC" & Source != "GO:MF") %>% 
+  arrange(desc(log10pvalue)) %>%
+  mutate(term_name = fct_reorder(term_name, log10pvalue, .desc = F)) %>% 
+  top_n(15, log10pvalue) %>%
+  ggplot(aes(y=term_name, x = log10pvalue, col = log10pvalue, size = Gene_Ratio,))+
+  geom_point() +
+  scale_fill_viridis(option = "A") +
+  scale_color_viridis(option = "A")+
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40))+
+  facet_wrap(~Source, scales = "free")+
+  labs(y="Source Database\n", x = "\n-log10(p-value)", col = "-log10(p-value)", size =
+         "Gene Ratio") +
+  ggtitle("g:Profiler Functional Enrichment Analysis GO results\nControl: THC VS Vehicle") +
+  theme_classic(base_size = 12)
+  
+ggsave(plot = test, 
+       filename = "bubble_plots_batch/test.tiff",
+       dpi = 500, 
+       device = "tiff", 
+       width = 50, 
+       height = 20,
+       units = "cm")
+
+ggsave(plot = test2, 
+       filename = "bubble_plots_batch/test2.tiff",
+       dpi = 500, 
+       device = "tiff", 
+       width = 50, 
+       height = 30,
+       units = "cm")
+```
+
