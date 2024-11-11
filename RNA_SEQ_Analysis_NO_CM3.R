@@ -1,8 +1,5 @@
 ---
-title: "Mar_RNASEQ_NO_CM3"
-author: "Sebastian Vanin"
-date: "2023-06-29"
-output: html_document
+
 ---
 
 ```{r setup, include=FALSE}
